@@ -76,5 +76,5 @@ torchrun --nproc_per_node=4 train.py --batch_size 64 --context_length 1024 --ddp
 ---
 
 ## License
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-```
+This project is licensed under the MIT License.
+
