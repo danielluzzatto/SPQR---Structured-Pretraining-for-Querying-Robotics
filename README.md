@@ -78,10 +78,3 @@ torchrun --nproc_per_node=4 train.py --batch_size 64 --context_length 1024 --ddp
 ## License
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 ```
-
-### Notes:
-1. Replace `LICENSE` with your actual license file if you have one.
-2. If you have a diagram or screenshot of the architecture, add it under the **Features** section.
-3. If you want to include a link to your dataset or pretrained weights, add a **Datasets** or **Pretrained Models** section.
-
-Let me know if you need further adjustments!
