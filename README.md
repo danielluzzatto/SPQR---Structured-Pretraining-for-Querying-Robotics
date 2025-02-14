@@ -62,7 +62,7 @@ pip install torch numpy tiktoken
 python train.py --batch_size 64 --context_length 1024
 
 # Multi-GPU (4 GPUs)
-torchrun --nproc_per_node=4 train.py --batch_size 64 --context_length 1024 --ddp
+torchrun --nproc_per_node=4 traingpt-2.py --batch_size 64 --context_length 1024 --ddp
 ```
 
 

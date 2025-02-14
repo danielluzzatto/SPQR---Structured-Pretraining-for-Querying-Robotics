@@ -9,6 +9,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 from datetime import datetime
+from transformers import GPT2LMHeadModel
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -35,7 +36,7 @@ class CausalSelfAttention(nn.Module):
         # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float("-inf"))
         # att = F.softmax(att, dim = -1) # changed here to -1
         # y = att @ v
-        y = F.scaled_dot_product_attention(q, k, v, is_causal= True) # Flash attention
+        y = F.scaled_dot_product_attention(q, k, v, is_causal= True) # Flash attention instead of the regular attention mechanism above
 
         y = y.transpose(1,2).contiguous().view(    B,T,C)
         y = self.c_proj(y)
@@ -132,8 +133,6 @@ class GPT(nn.Module):
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
-    
-        from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
 
         # n_layer, n_head and n_embd are determined from model_type
@@ -282,8 +281,8 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-total_batch_size = 8192 # 524288 # 2**19
-B = 4 # 16 or 32
+total_batch_size = 524288 # 2**19  8192 in previous test on cpu
+B = 64
 T = 1024
 assert total_batch_size % (B * T * ddp_world_size) == 0
 grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
@@ -306,13 +305,13 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Compile Model. Make sure it does not crash
-# model = torch.compile(model) 
+model = torch.compile(model) 
 
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10 # 715
-max_steps = 201 # 19073
+warmup_steps = 715 # 10
+max_steps = 19073 # 201
 
 def get_lr(it): #  lr from gpt 3 cause the one in 2 is not available
     if it < warmup_steps:
@@ -394,8 +393,8 @@ for step in range(max_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         # uncomment when using cuda
-        # with torch.autocast(device_type= device, dtype= torch.bfloat16):
-        #     logits, loss = model(x, y)
+        with torch.autocast(device_type= device, dtype= torch.bfloat16):
+            logits, loss = model(x, y)
         logits, loss = model(x, y)
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
@@ -430,63 +429,3 @@ for step in range(max_steps):
 
 if ddp:
     destroy_process_group()
-sys.exit(0)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# print(loss)
-# sys.exit(0)
-
-
-# enc = tiktoken.get_encoding('gpt2')
-# tokens = enc.encode("Hello, I'm a language model")
-
-# x = tokens.to(device)
-
-# torch.manual_seed(42)
-# while x.size(1) < max_length:
-#     logits = model(x)
-#     logits = logits[:,-1,:]
-#     probs = F.softmax(logits, dim=1)
-#     topkprobs, topkindices = torch.topk(probs, 50, dim=-1)
-#     ix = torch.multinomial(topkprobs, 1)
-#     xcol = torch.gather(topkindices, -1, ix)
-#     x = torch.cat((x, xcol), dim = 1)
-
-# for i in range(num_return_sequence):
-#     tokens = x[i, :max_length].tolist()
-#     decoded = enc.decode(tokens)
-#     print(">", decoded)
