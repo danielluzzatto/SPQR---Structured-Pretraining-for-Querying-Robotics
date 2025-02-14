@@ -1,3 +1,5 @@
+# imports
+
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -10,6 +12,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 from datetime import datetime
 from transformers import GPT2LMHeadModel
+from hellaswag import render_example, iterate_examples
+#----------------------
+
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -247,6 +252,23 @@ class DataLoaderLite:
             self.current_position = self.B * self.T * self.process_rank
         return x, y
 
+def get_most_likely_row(tokens, mask, label):
+    shift_logits = (logits[..., :-1, :]).contiguous()
+    shift_tokens = (tokens[..., 1:]).contiguous()
+    flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_shift_tokens = shift_tokens.view(-1)
+    shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none') # check tokens loss
+    shift_losses = shift_losses.view(tokens.size(0), -1)
+    shift_mask = (mask[..., 1:]).contiguous() # we must shift mask, so we start at the last prompt token
+    masked_shift_losses = shift_losses * shift_mask
+        # sum and divide by the number of 1s in the mask
+    sum_loss = masked_shift_losses.sum(dim=1)
+    avg_loss = sum_loss / shift_mask.sum(dim=1) #find average loss per completion and check avg
+
+    pred = sum_loss.argmin().item()
+    pred_norm = avg_loss.argmin().item()
+    return pred_norm
+
 device = 'cpu'
 if torch.cuda.is_available():
     device = 'cuda'
@@ -282,7 +304,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 total_batch_size = 524288 # 2**19  8192 in previous test on cpu
-B = 64
+B = 2
 T = 1024
 assert total_batch_size % (B * T * ddp_world_size) == 0
 grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
@@ -310,8 +332,8 @@ model = torch.compile(model)
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 715 # 10
-max_steps = 19073 # 201
+warmup_steps = 10 # 10 715
+max_steps = 201 # 201 19073
 
 def get_lr(it): #  lr from gpt 3 cause the one in 2 is not available
     if it < warmup_steps:
@@ -334,12 +356,14 @@ lrs = []
 grad_norms = []
 tokens_per_sec_list = []
 generated_samples = []
+hellaswag_res = []
 
 optimizer = raw_model.configure_optimizers(weight_decay = 0.1, learning_rate = 6e-4, device = device)
 for step in range(max_steps):
+    last_step = (step == max_steps - 1) 
     t0 = time.time()
     # every 100 steps evaluate the loss in val step
-    if step % 100 == 0:
+    if step % 100 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -358,14 +382,15 @@ for step in range(max_steps):
             val_losses.append(val_loss_accum.item())
             np.save(os.path.join(log_dir, "val_losses.npy"), np.array(val_losses))
             print(f"validation loss: {val_loss_accum.item():.4f}")
+
     
     # check results of the model after validation, not after first step cause it is noisy
-    if step > 0 and step % 100 == 0:
+    if step > 0 and step % 100 == 0 or last_step:
         model.eval()
         num_return_sequence = 4
         max_length = 32
         enc = tiktoken.get_encoding('gpt2')
-        tokens = enc.encode("Hello, I'm a language model")
+        tokens = enc.encode("Hello, I'm a language model,")
         tokens = torch.tensor(tokens, dtype= torch.long) # shape 8
         tokens = tokens.unsqueeze(0).repeat(num_return_sequence, 1)
         xgen = tokens.to(device)
@@ -384,6 +409,36 @@ for step in range(max_steps):
                     tokens = xgen[i, :max_length].tolist()
                     decoded = enc.decode(tokens)
                     print(f"rank {ddp_rank}, sample: {i}: {decoded}")
+    
+    # check hellaswag
+    if step > 0 and step % 100 == 0 or last_step:
+        num_corrected_norm = 0
+        total = 0
+        for i, example in enumerate(iterate_examples("val")):
+            if i % ddp_world_size != ddp_rank:
+                continue
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            with torch.no_grad():
+                with torch.autocast(device_type = device, dtype= torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, label)
+            total += 1
+            num_corrected_norm += int(pred_norm == label)
+        
+        if ddp:
+            total = torch.tensor(total, dtype= torch.long, device = device)
+            num_corrected_norm = torch.tensor(num_corrected_norm, dtype= torch.long, device = device)
+            dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+            total = total.item()
+            num_correct_norm = num_correct_norm.item()
+        acc_norm = num_correct_norm / total
+        if master_process:
+            print(f"HellaSwag accuracy: {acc_norm:.4f}")
+            hellaswag_res.append()
+        np.save(os.path.join(log_dir, "hellaswag_eval.npy"), np.array(hellaswag_res))
+
 
     # training
     model.train()
